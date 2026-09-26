@@ -473,8 +473,10 @@ elif opcja == "📊 Dziennik Dietetyczny":
     st.title("📊 Dziennik Dietetyczny")
 
     dzisiejsza_data = st.date_input("Wybierz dzień:", value=date.today())
+    # Konwersja obiektu date na napis w formacie YYYY-MM-DD
+    dzisiejsza_data_str = str(dzisiejsza_data)
 
-    conn = get_db_connection()
+    conn = sqlite3.connect("przepisy.db")
     cursor = conn.cursor()
     
     cel_kcal = st.number_input("Twój cel kaloryczny (kcal):", value=2000, step=50)
@@ -491,21 +493,33 @@ elif opcja == "📊 Dziennik Dietetyczny":
 
     if st.button("➕ Dodaj do dzisiejszego dziennika") and zjedzone != "-- Wybierz posiłek --":
         p_id = dict_all[zjedzone][0]
-        cursor.execute("INSERT INTO dziennik (dzien_data, przepis_id, porcje) VALUES (?, ?, ?)", (dzisiejsza_data, p_id, ile_porcji_dziennik))
+        try:
+            cursor.execute("INSERT INTO dziennik (dzien_data, przepis_id, porcje) VALUES (?, ?, ?)", (dzisiejsza_data_str, p_id, ile_porcji_dziennik))
+        except:
+            cursor.execute("INSERT INTO dziennik (dzien_data, przepis_id, porcja) VALUES (?, ?, ?)", (dzisiejsza_data_str, p_id, ile_porcji_dziennik))
         conn.commit()
         st.success("Dodano posiłek!")
         st.rerun()
 
-    cursor.execute("""
-        SELECT p.id, p.tytul, p.kcal, p.bialko, p.wegle, p.tluszcze, d.id, d.porcje
-        FROM dziennik d
-        JOIN przepisy p ON d.przepis_id = p.id
-        WHERE d.dzien_data = ?
-    """, (dzisiejsza_data,))
-    eaten_rows = cursor.fetchall()
+    try:
+        cursor.execute("""
+            SELECT p.id, p.tytul, p.kcal, p.bialko, p.wegle, p.tluszcze, d.id, d.porcje
+            FROM dziennik d
+            JOIN przepisy p ON d.przepis_id = p.id
+            WHERE d.dzien_data = ?
+        """, (dzisiejsza_data_str,))
+        eaten_rows = cursor.fetchall()
+    except:
+        cursor.execute("""
+            SELECT p.id, p.tytul, p.kcal, p.bialko, p.wegle, p.tluszcze, d.id, d.porcja
+            FROM dziennik d
+            JOIN przepisy p ON d.przepis_id = p.id
+            WHERE d.dzien_data = ?
+        """, (dzisiejsza_data_str,))
+        eaten_rows = cursor.fetchall()
 
     st.markdown("---")
-    st.subheader(f"Podsumowanie spożycia z dnia: {dzisiejsza_data}")
+    st.subheader(f"Podsumowanie spożycia z dnia: {dzisiejsza_data_str}")
 
     sum_kcal = sum(r[2] * (r[7] if len(r) > 7 and r[7] else 1.0) for r in eaten_rows)
     sum_b = sum(r[3] * (r[7] if len(r) > 7 and r[7] else 1.0) for r in eaten_rows)
