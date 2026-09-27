@@ -6,32 +6,16 @@ import base64
 from datetime import date
 import math
 
-# Próba zaimportowania sterownika Turso
-try:
-    import libsql_experimental as libsql
-    HAS_LIBSQL = True
-except ImportError:
-    HAS_LIBSQL = False
-
 st.set_page_config(page_title="Dziennik dietetyczny", layout="wide")
 
 DEFAULT_IMAGE = "https://images.unsplash.com/photo-1490645935967-10de6ba17061?w=400"
 
-# --- POŁĄCZENIE Z BAZĄ DANYCH (TURSO LUB LOCAL SQLITE) ---
-def get_db_connection():
-    """Łączy się z chmurową bazą Turso (jeśli podano klucze w st.secrets) lub z lokalną bazą SQLite."""
-    if HAS_LIBSQL and "TURSO_DATABASE_URL" in st.secrets and "TURSO_AUTH_TOKEN" in st.secrets:
-        return libsql.connect(
-            database=st.secrets["TURSO_DATABASE_URL"],
-            auth_token=st.secrets["TURSO_AUTH_TOKEN"]
-        )
-    return sqlite3.connect("przepisy.db")
-
-# --- INICJALIZACJA BAZY DANYCH ---
+# --- INICJALIZACJA I AUTOMATYCZNA MIGRACJA BAZY DANYCH ---
 def init_db():
-    conn = get_db_connection()
+    conn = sqlite3.connect("przepisy.db")
     cursor = conn.cursor()
     
+    # 1. Tworzenie tabeli przepisów (jeśli nie istnieje)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS przepisy (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -47,6 +31,22 @@ def init_db():
         )
     ''')
     
+    # Automatyczne dodawanie brakujących kolumn w istniejących starych bazach
+    cursor.execute("PRAGMA table_info(przepisy)")
+    cols = [col[1] for col in cursor.fetchall()]
+    needed_cols = {
+        "kcal": "INTEGER DEFAULT 500",
+        "bialko": "REAL DEFAULT 20.0",
+        "wegle": "REAL DEFAULT 50.0",
+        "tluszcze": "REAL DEFAULT 15.0",
+        "image_url": "TEXT DEFAULT ''",
+        "zrodlo": "TEXT DEFAULT 'pdf'"
+    }
+    for col_name, col_type in needed_cols.items():
+        if col_name not in cols:
+            cursor.execute(f"ALTER TABLE przepisy ADD COLUMN {col_name} {col_type}")
+
+    # 2. Tworzenie tabeli planera
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS planer (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -56,6 +56,7 @@ def init_db():
         )
     ''')
     
+    # 3. Tworzenie tabeli dziennika
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS dziennik (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -65,6 +66,12 @@ def init_db():
             FOREIGN KEY(przepis_id) REFERENCES przepisy(id) ON DELETE CASCADE
         )
     ''')
+    
+    cursor.execute("PRAGMA table_info(dziennik)")
+    dziennik_cols = [col[1] for col in cursor.fetchall()]
+    if "porcje" not in dziennik_cols:
+        cursor.execute("ALTER TABLE dziennik ADD COLUMN porcje REAL DEFAULT 1.0")
+
     conn.commit()
     conn.close()
 
@@ -106,6 +113,7 @@ def extract_meals_and_images_from_pdf(pdf_file):
         images = page.get_images(full=True)
         best_img_bytes = None
         max_size = 0
+        ext = "png"
         
         for img_info in images:
             xref = img_info[0]
@@ -125,10 +133,10 @@ def extract_meals_and_images_from_pdf(pdf_file):
         w_m = re.search(r'(\d+(?:[\.,]\d+)?)\s*g?\s*W\b', text, re.I)
         t_m = re.search(r'(\d+(?:[\.,]\d+)?)\s*g?\s*T\b', text, re.I)
 
-        kcal = int(kcal_m.group(1)) if kcal_m else 0
-        b = float(b_m.group(1).replace(',', '.')) if b_m else 0.0
-        w = float(w_m.group(1).replace(',', '.')) if w_m else 0.0
-        t = float(t_m.group(1).replace(',', '.')) if t_m else 0.0
+        kcal = int(kcal_m.group(1)) if kcal_m else 500
+        b = float(b_m.group(1).replace(',', '.')) if b_m else 20.0
+        w = float(w_m.group(1).replace(',', '.')) if w_m else 50.0
+        t = float(t_m.group(1).replace(',', '.')) if t_m else 15.0
 
         raw_lines = [l.strip() for l in text.split('\n') if l.strip()]
         cleaned_lines = []
@@ -231,7 +239,7 @@ if opcja == "📖 Baza Posiłków":
     with c_slider:
         wybrana_kalorycznosc = st.slider("🔥 Maks. kaloryczność (dla 1 porcji)", min_value=100, max_value=3000, value=1500, step=50)
 
-    conn = get_db_connection()
+    conn = sqlite3.connect("przepisy.db")
     cursor = conn.cursor()
     cursor.execute("SELECT id, tytul, skladniki, przygotowanie, kcal, bialko, wegle, tluszcze, image_url, zrodlo FROM przepisy WHERE kcal <= ?", (wybrana_kalorycznosc,))
     rows = cursor.fetchall()
@@ -248,6 +256,7 @@ if opcja == "📖 Baza Posiłków":
 
     st.caption(f"Znaleziono przepisów: {len(rows)}")
 
+    # PAGINACJA - MAKSYMALNIE 5 PREPISÓW NA STRONĘ
     NA_STRONE = 5
     lacznie_stron = math.ceil(len(rows) / NA_STRONE) if rows else 1
     
@@ -264,6 +273,7 @@ if opcja == "📖 Baza Posiłków":
     end_idx = start_idx + NA_STRONE
     wyswietlane_rows = rows[start_idx:end_idx]
 
+    # WYŚWIETLANIE PRZEPISÓW
     for r in wyswietlane_rows:
         p_id, tytul, skladniki, przygotowanie, kcal, b, w, t, img_url, zrodlo = r
         
@@ -313,7 +323,7 @@ if opcja == "📖 Baza Posiłków":
                         new_przygotowanie = st.text_area("Sposób przygotowania", value=przygotowanie, height=150)
                         
                         if st.form_submit_button("💾 Zapisz zmiany"):
-                            conn = get_db_connection()
+                            conn = sqlite3.connect("przepisy.db")
                             cursor = conn.cursor()
                             cursor.execute("""
                                 UPDATE przepisy 
@@ -327,7 +337,7 @@ if opcja == "📖 Baza Posiłków":
 
             with col_btn2:
                 if st.button("🗑️ Usuń ten przepis", key=f"del_{p_id}"):
-                    conn = get_db_connection()
+                    conn = sqlite3.connect("przepisy.db")
                     cursor = conn.cursor()
                     cursor.execute("DELETE FROM przepisy WHERE id = ?", (p_id,))
                     conn.commit()
@@ -349,7 +359,7 @@ elif opcja == "➕ Dodaj Przepis":
                 try:
                     recipes = extract_meals_and_images_from_pdf(uploaded_file)
                     
-                    conn = get_db_connection()
+                    conn = sqlite3.connect("przepisy.db")
                     cursor = conn.cursor()
                     
                     for r in recipes:
@@ -385,7 +395,7 @@ elif opcja == "➕ Dodaj Przepis":
                 if not m_tytul.strip():
                     st.error("Podaj nazwę przepisu!")
                 else:
-                    conn = get_db_connection()
+                    conn = sqlite3.connect("przepisy.db")
                     cursor = conn.cursor()
                     cursor.execute("""
                         INSERT INTO przepisy (tytul, skladniki, przygotowanie, kcal, bialko, wegle, tluszcze, image_url, zrodlo)
@@ -397,7 +407,7 @@ elif opcja == "➕ Dodaj Przepis":
 
     st.markdown("---")
     if st.button("🗑️ Wyczyść całą bazę przepisów (Reset Bazy)"):
-        conn = get_db_connection()
+        conn = sqlite3.connect("przepisy.db")
         cursor = conn.cursor()
         cursor.execute("DELETE FROM przepisy")
         cursor.execute("DELETE FROM planer")
@@ -411,7 +421,7 @@ elif opcja == "➕ Dodaj Przepis":
 elif opcja == "📅 Planer & Zakupy":
     st.title("📅 Planer Tygodniowy & Lista Zakupów")
 
-    conn = get_db_connection()
+    conn = sqlite3.connect("przepisy.db")
     cursor = conn.cursor()
     cursor.execute("SELECT id, tytul, kcal FROM przepisy")
     przepisy_list = cursor.fetchall()
@@ -473,8 +483,6 @@ elif opcja == "📊 Dziennik Dietetyczny":
     st.title("📊 Dziennik Dietetyczny")
 
     dzisiejsza_data = st.date_input("Wybierz dzień:", value=date.today())
-    # Konwersja obiektu date na napis w formacie YYYY-MM-DD
-    dzisiejsza_data_str = str(dzisiejsza_data)
 
     conn = sqlite3.connect("przepisy.db")
     cursor = conn.cursor()
@@ -493,33 +501,21 @@ elif opcja == "📊 Dziennik Dietetyczny":
 
     if st.button("➕ Dodaj do dzisiejszego dziennika") and zjedzone != "-- Wybierz posiłek --":
         p_id = dict_all[zjedzone][0]
-        try:
-            cursor.execute("INSERT INTO dziennik (dzien_data, przepis_id, porcje) VALUES (?, ?, ?)", (dzisiejsza_data_str, p_id, ile_porcji_dziennik))
-        except:
-            cursor.execute("INSERT INTO dziennik (dzien_data, przepis_id, porcja) VALUES (?, ?, ?)", (dzisiejsza_data_str, p_id, ile_porcji_dziennik))
+        cursor.execute("INSERT INTO dziennik (dzien_data, przepis_id, porcje) VALUES (?, ?, ?)", (dzisiejsza_data, p_id, ile_porcji_dziennik))
         conn.commit()
         st.success("Dodano posiłek!")
         st.rerun()
 
-    try:
-        cursor.execute("""
-            SELECT p.id, p.tytul, p.kcal, p.bialko, p.wegle, p.tluszcze, d.id, d.porcje
-            FROM dziennik d
-            JOIN przepisy p ON d.przepis_id = p.id
-            WHERE d.dzien_data = ?
-        """, (dzisiejsza_data_str,))
-        eaten_rows = cursor.fetchall()
-    except:
-        cursor.execute("""
-            SELECT p.id, p.tytul, p.kcal, p.bialko, p.wegle, p.tluszcze, d.id, d.porcja
-            FROM dziennik d
-            JOIN przepisy p ON d.przepis_id = p.id
-            WHERE d.dzien_data = ?
-        """, (dzisiejsza_data_str,))
-        eaten_rows = cursor.fetchall()
+    cursor.execute("""
+        SELECT p.id, p.tytul, p.kcal, p.bialko, p.wegle, p.tluszcze, d.id, d.porcje
+        FROM dziennik d
+        JOIN przepisy p ON d.przepis_id = p.id
+        WHERE d.dzien_data = ?
+    """, (dzisiejsza_data,))
+    eaten_rows = cursor.fetchall()
 
     st.markdown("---")
-    st.subheader(f"Podsumowanie spożycia z dnia: {dzisiejsza_data_str}")
+    st.subheader(f"Podsumowanie spożycia z dnia: {dzisiejsza_data}")
 
     sum_kcal = sum(r[2] * (r[7] if len(r) > 7 and r[7] else 1.0) for r in eaten_rows)
     sum_b = sum(r[3] * (r[7] if len(r) > 7 and r[7] else 1.0) for r in eaten_rows)
